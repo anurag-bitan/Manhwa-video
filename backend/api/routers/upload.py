@@ -1,9 +1,24 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks, Form
-from db.supabase_admin import supabase_admin
-from core.langgraph_app import run_pipeline, PipelineState
+import logging
+from pathlib import Path
 import uuid
 
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    UploadFile,
+)
+
+from core.auth import AuthenticatedUser, get_current_user
+from db.supabase_admin import supabase_admin
+from core.langgraph_app import run_pipeline, PipelineState
+
 router = APIRouter(prefix="/jobs", tags=["jobs"])
+logger = logging.getLogger(__name__)
+MAX_PDF_BYTES = 50 * 1024 * 1024
 
 def process_pipeline_background(job_id: str, pdf_storage_path: str,
                                 manhwa_name: str = "", genre: str = "", chapter_number: str = ""):
@@ -28,6 +43,7 @@ def process_pipeline_background(job_id: str, pdf_storage_path: str,
         "chapter_number": chapter_number,
         "timings": [],
         "combined_audio_url": "",
+        "combined_audio_path": "",
     }
     print(f"🚀 Starting pipeline for job {job_id}")
     try:
@@ -45,6 +61,7 @@ def process_pipeline_background(job_id: str, pdf_storage_path: str,
 @router.post("/upload")
 async def upload_pdf(
     background_tasks: BackgroundTasks,
+    current_user: AuthenticatedUser = Depends(get_current_user),
     # Accept both 'file' and 'manga_pdf' for the PDF
     file: UploadFile = File(None),
     manga_pdf: UploadFile = File(None),
@@ -59,11 +76,17 @@ async def upload_pdf(
     if not pdf_file:
         raise HTTPException(status_code=400, detail="No PDF file provided")
 
-    if not pdf_file.filename.endswith(".pdf"):
+    filename = Path(pdf_file.filename or "upload.pdf").name
+    if not filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files allowed")
 
-    pdf_bytes = await pdf_file.read()
-    file_path = f"{uuid.uuid4()}/{pdf_file.filename}"
+    pdf_bytes = await pdf_file.read(MAX_PDF_BYTES + 1)
+    if len(pdf_bytes) > MAX_PDF_BYTES:
+        raise HTTPException(status_code=413, detail="PDF must be 50 MB or smaller")
+    if not pdf_bytes.startswith(b"%PDF-"):
+        raise HTTPException(status_code=400, detail="The uploaded file is not a valid PDF")
+
+    file_path = f"{uuid.uuid4()}/source.pdf"
 
     # Upload to Supabase
     try:
@@ -72,14 +95,26 @@ async def upload_pdf(
             file=pdf_bytes,
             file_options={"content-type": "application/pdf"}
         )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
+    except Exception:
+        logger.exception("Supabase PDF upload failed")
+        raise HTTPException(status_code=500, detail="PDF upload failed")
 
-    pdf_url = supabase_admin.storage.from_("pdfs").get_public_url(file_path)
+    pdf_url_response = supabase_admin.storage.from_("pdfs").create_signed_url(
+        file_path, 600
+    )
+    if isinstance(pdf_url_response, str):
+        pdf_url = pdf_url_response
+    else:
+        pdf_url = (
+            pdf_url_response.get("signedURL")
+            or pdf_url_response.get("signedUrl")
+            or pdf_url_response.get("signed_url")
+        )
 
     job = supabase_admin.table("processing_jobs").insert({
         "status": "UPLOADED",
         "pdf_storage_path": file_path,
+        "cognito_sub": current_user.sub,
     }).execute()
     job_id = job.data[0]["id"]
 

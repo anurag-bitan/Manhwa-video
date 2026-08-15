@@ -1,61 +1,112 @@
-const API_URL = import.meta.env.VITE_API_BASE_URL;
+import { fetchAuthSession } from "aws-amplify/auth";
 
-async function parseJSON(response) {
-  try {
-    return await response.json();
-  } catch {
-    const text = await response.text();
-    throw new Error(`Backend returned non-JSON (${response.status}):\n${text}`);
+
+const API_URL = import.meta.env.VITE_API_BASE_URL?.replace(/\/$/, "");
+
+export class ApiError extends Error {
+  constructor(message, status = 0, details = null) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.details = details;
   }
 }
 
-// Start a new job
+async function parseResponse(response) {
+  const text = await response.text();
+  if (!text) return null;
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+}
+
+function errorMessage(payload, status) {
+  if (typeof payload === "string" && payload.trim()) return payload;
+  if (typeof payload?.detail === "string") return payload.detail;
+  if (typeof payload?.message === "string") return payload.message;
+  return `Backend request failed (${status})`;
+}
+
+async function getAccessToken() {
+  try {
+    const session = await fetchAuthSession();
+    const accessToken = session.tokens?.accessToken;
+    if (!accessToken) throw new Error("No access token");
+    return accessToken.toString();
+  } catch {
+    throw new ApiError("Your session expired. Please sign in again.", 401);
+  }
+}
+
+async function authenticatedFetch(path, options = {}) {
+  if (!API_URL) {
+    throw new ApiError("VITE_API_BASE_URL is not configured.");
+  }
+
+  const headers = new Headers(options.headers);
+  headers.set("Authorization", `Bearer ${await getAccessToken()}`);
+
+  const response = await fetch(`${API_URL}${path}`, {
+    ...options,
+    headers,
+  });
+  const payload = await parseResponse(response);
+
+  if (!response.ok) {
+    throw new ApiError(errorMessage(payload, response.status), response.status, payload);
+  }
+
+  return payload;
+}
+
+// Start a new job.
 export const generateAudioStory = async (formData) => {
-  const res = await fetch(`${API_URL}/jobs/upload`, {
+  const data = await authenticatedFetch("/jobs/upload", {
     method: "POST",
     body: formData,
   });
-  if (!res.ok) throw await parseJSON(res);
-  const data = await res.json();
   return { task_id: data.job_id };
 };
 
-// Poll job status
+// Poll a job that belongs to the signed-in Cognito user.
 export const checkTaskStatus = async (taskId) => {
-  const res = await fetch(`${API_URL}/jobs/${taskId}`);
-  if (!res.ok) throw await parseJSON(res);
-  const job = await res.json();
-  
-  // Map your backend statuses to the frontend's expected states
+  const encodedTaskId = encodeURIComponent(taskId);
+  const job = await authenticatedFetch(`/jobs/${encodedTaskId}`);
   const status = job.status;
+
   if (status === "TTS_COMPLETED") {
-    // Fetch the assets and return them as result
-    const assetsRes = await fetch(`${API_URL}/jobs/${taskId}/assets`);
-    if (!assetsRes.ok) throw new Error("Failed to fetch assets");
-    const assets = await assetsRes.json();
+    const assets = await authenticatedFetch(`/jobs/${encodedTaskId}/assets`);
     return {
       state: "SUCCESS",
       progress: 100,
       result: assets,
     };
-  } else if (status === "FAILED") {
-    throw new Error(job.state_json?.error || "Job failed");
-  } else {
-    // Map status to progress percentage
-    const progressMap = {
-      UPLOADED: 5,
-      EXTRACTED: 15,
-      PANELS_DETECTED: 30,
-      OCR_COMPLETED: 50,
-      CHAPTER_DETECTED: 60,
-      SCENE_BUILDING: 70,
-      SCRIPT_GENERATING: 80,
-      // TTS_COMPLETED handled above
-    };
+  }
+
+  if (status === "FAILED") {
     return {
-      state: "PROCESSING",
-      progress: progressMap[status] || 50,
-      result: null,
+      state: "FAILURE",
+      progress: 0,
+      error: job.state_json?.error || "Job failed",
     };
   }
+
+  const progressMap = {
+    UPLOADED: 5,
+    EXTRACTED: 15,
+    PANELS_DETECTED: 30,
+    OCR_COMPLETED: 50,
+    CHAPTER_DETECTED: 60,
+    SCENE_BUILDING: 70,
+    SCRIPT_GENERATING: 80,
+  };
+
+  return {
+    state: "PROCESSING",
+    progress: progressMap[status] || 5,
+    result: null,
+  };
 };

@@ -20,7 +20,9 @@ class PipelineState(TypedDict):
     rolling_summary: str        # kept for compatibility, not actively used
     narration: List[dict]
     error: Optional[str]
-    audio_urls: List[str]
+    audio_urls: List[dict]
+    combined_audio_path: str
+    combined_audio_url: str
     timings: List[dict]
     manhwa_name: str
     genre: str
@@ -200,13 +202,16 @@ def build_scenes_node(state: PipelineState) -> PipelineState:
         if is_skip:
             scenes.append({
                 "scene_index": i,
+                "segment_id": f"scene_{i:04d}",
                 "panels": [ocr["panel_index"]],
                 "text": ocr["text"],
                 "is_story": False
             })
         else:
             scenes.append({
-                "scene_index": story_index,
+                "scene_index": i,
+                "story_index": story_index,
+                "segment_id": f"scene_{i:04d}",
                 "panels": [ocr["panel_index"]],
                 "text": ocr["text"],
                 "is_story": True
@@ -234,7 +239,11 @@ def generate_narration_node(state: PipelineState) -> PipelineState:
 
     for scene in state["scenes"]:
         if not scene["is_story"] or not scene["text"].strip():
-            narrations.append({"scene_index": scene["scene_index"], "narration_text": ""})
+            narrations.append({
+                "scene_index": scene["scene_index"],
+                "segment_id": scene["segment_id"],
+                "narration_text": "",
+            })
             continue
 
         ocr_text = scene["text"]
@@ -274,13 +283,14 @@ Hindi narration (only for this panel):"""
         )
         except Exception as e:
             print(f"Narration generation failed: {e}")
-        raise
+            raise
         
         narration_text = response.choices[0].message.content.strip()
         narration_text = re.sub(r'\([^)]*\)', '', narration_text).strip()
 
         narrations.append({
             "scene_index": scene["scene_index"],
+            "segment_id": scene["segment_id"],
             "narration_text": narration_text
         })
         prev_text = narration_text   # update for next iteration
@@ -293,12 +303,10 @@ Hindi narration (only for this panel):"""
 
 
 def synthesize_audio_node(state: PipelineState) -> PipelineState:
-    """Generate Hindi TTS audio for each narration scene, compute timings, and combine audios."""
-    import asyncio
+    """Generate per-scene TTS and one correctly encoded master track."""
     import edge_tts
     import io
-    from db.supabase_admin import supabase_admin
-    from mutagen.mp3 import MP3
+    from pydub import AudioSegment
 
     async def generate_audio(text: str, voice: str = "hi-IN-SwaraNeural") -> bytes:
         communicate = edge_tts.Communicate(text, voice)
@@ -310,54 +318,48 @@ def synthesize_audio_node(state: PipelineState) -> PipelineState:
 
     audio_urls = []
     timings = []
-    current_time = 0.0
+    master_audio = AudioSegment.empty()
 
     for narration_item in state["narration"]:
         scene_idx = narration_item["scene_index"]
+        segment_id = narration_item.get("segment_id", f"scene_{scene_idx:04d}")
         text = narration_item["narration_text"]
 
         if not text.strip():
-            audio_urls.append("")
-            timings.append({"scene_index": scene_idx, "start": current_time, "duration": 0})
             continue
 
         audio_data = asyncio.run(generate_audio(text))
-        mp3 = MP3(io.BytesIO(audio_data))
-        duration = mp3.info.length
+        decoded_segment = AudioSegment.from_file(io.BytesIO(audio_data), format="mp3")
+        start_time = len(master_audio) / 1000.0
+        master_audio += decoded_segment
+        end_time = len(master_audio) / 1000.0
 
-        storage_path = f"{state['job_id']}/audio/scene_{scene_idx:04d}.mp3"
-
+        storage_path = f"{state['job_id']}/audio/{segment_id}.mp3"
         try:
             supabase_admin.storage.from_("audio").upload(
                 path=storage_path,
                 file=audio_data,
-                file_options={"content-type": "audio/mpeg"}
+                file_options={"content-type": "audio/mpeg"},
             )
         except Exception as e:
-            if "Duplicate" in str(e) or "409" in str(e):
-                print(f"Audio for scene {scene_idx} already exists, skipping upload.")
-            else:
+            if "Duplicate" not in str(e) and "409" not in str(e):
                 raise
 
-        audio_url = supabase_admin.storage.from_("audio").get_public_url(storage_path)
-        audio_urls.append(audio_url)
-        timings.append({"scene_index": scene_idx, "start": current_time, "duration": duration})
-        current_time += duration
+        audio_urls.append({"segment_id": segment_id, "path": storage_path})
+        timings.append({
+            "segment_id": segment_id,
+            "scene_index": scene_idx,
+            "start_time": start_time,
+            "end_time": end_time,
+            "duration": end_time - start_time,
+        })
 
-    # Combine all non-empty scene audios into one MP3
-    combined_audio_data = b""
-    for url in audio_urls:
-        if not url:
-            continue
-        # Extract the path from the URL by using the known base path
-        path = url.split("/object/public/audio/")[-1]   # safer extraction
-        try:
-            resp = supabase_admin.storage.from_("audio").download(path)
-            combined_audio_data += resp
-        except Exception as e:
-            print(f"Warning: Could not download audio for combining: {path} – {e}")
-
-    if combined_audio_data:
+    # Concatenate decoded audio and encode once. Joining MP3 bytes directly can
+    # add headers and encoder padding between scenes, causing timestamp drift.
+    if len(master_audio) > 0:
+        combined_buffer = io.BytesIO()
+        master_audio.export(combined_buffer, format="mp3", bitrate="128k")
+        combined_audio_data = combined_buffer.getvalue()
         combined_path = f"{state['job_id']}/audio/combined.mp3"
         try:
             supabase_admin.storage.from_("audio").upload(
@@ -370,9 +372,10 @@ def synthesize_audio_node(state: PipelineState) -> PipelineState:
                 pass
             else:
                 print(f"Failed to upload combined audio: {e}")
-        combined_url = supabase_admin.storage.from_("audio").get_public_url(combined_path)
-        state["combined_audio_url"] = combined_url
+        state["combined_audio_path"] = combined_path
+        state["combined_audio_url"] = ""
     else:
+        state["combined_audio_path"] = ""
         state["combined_audio_url"] = ""
 
     state["audio_urls"] = audio_urls

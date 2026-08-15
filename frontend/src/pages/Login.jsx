@@ -4,8 +4,41 @@ import { useNavigate, useLocation } from "react-router-dom";
 import { Mail, Loader2, ArrowLeft, Shield, Lock } from "lucide-react";
 import Swal from "sweetalert2";
 
+function resolveRedirect(value) {
+  const pathname = typeof value === "string" ? value : value?.pathname;
+  if (
+    typeof pathname !== "string" ||
+    !pathname.startsWith("/") ||
+    pathname.startsWith("//")
+  ) {
+    return null;
+  }
+
+  const search =
+    typeof value?.search === "string" && value.search.startsWith("?")
+      ? value.search
+      : "";
+  return `${pathname}${search}`;
+}
+
+function readSavedRedirect() {
+  try {
+    const saved = sessionStorage.getItem("auth_redirect");
+    return saved ? JSON.parse(saved) : null;
+  } catch {
+    sessionStorage.removeItem("auth_redirect");
+    return null;
+  }
+}
+
 const Login = () => {
-  const { sendOtp, verifyOtp, signInWithGoogle } = useAuth();
+  const {
+    sendOtp,
+    resendOtp,
+    verifyOtp,
+    signInWithGoogle,
+    googleEnabled,
+  } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
 
@@ -16,12 +49,9 @@ const Login = () => {
   const [error, setError] = useState("");
   
   // ✅ SAFE redirect resolution
-  const savedRedirect = sessionStorage.getItem("auth_redirect");
-  const parsedRedirect = savedRedirect ? JSON.parse(savedRedirect) : null;
-
   const from =
-    location.state?.from?.pathname ||
-    parsedRedirect?.pathname ||
+    resolveRedirect(location.state?.from) ||
+    resolveRedirect(readSavedRedirect()) ||
     "/upload";
 
   const otpInputs = useRef([]);
@@ -46,15 +76,13 @@ const Login = () => {
     setError("");
 
     try {
-      console.log("Sending OTP to:", email);
-      const { data, error } = await sendOtp(email);
+      const { error } = await sendOtp(email);
       
       if (error) {
         console.error("OTP Send Error:", error);
         throw error;
       }
 
-      console.log("OTP Response:", data);
       setStep("otp");
       
       Swal.fire({
@@ -89,15 +117,12 @@ const Login = () => {
     setError("");
 
     try {
-      console.log("Verifying OTP:", otp);
       const { data, error } = await verifyOtp(email, otp);
       
       if (error) {
         console.error("OTP Verify Error:", error);
         throw error;
       }
-
-      console.log("Verification Response:", data);
 
       if (data.session) {
         Swal.fire({
@@ -118,9 +143,37 @@ const Login = () => {
       }
     } catch (err) {
       console.error("Verification error:", err);
-      setError("Invalid code. Please try again.");
+      setError(err.message || "Invalid code. Please try again.");
       setOtp(""); // Clear OTP on error
       otpInputs.current[0]?.focus(); // Focus first input
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleResendOtp = async () => {
+    setLoading(true);
+    setError("");
+    setOtp("");
+
+    try {
+      const { error: resendError } = await resendOtp(email);
+      if (resendError) throw resendError;
+
+      Swal.fire({
+        icon: "success",
+        title: "Code Resent!",
+        text: "Check your email and spam folder for the new code.",
+        background: "transparent",
+        color: "#fff",
+        timer: 3000,
+        showConfirmButton: false,
+        iconColor: "#a78bfa",
+        backdrop: "rgba(0,0,0,0.4)",
+      });
+    } catch (err) {
+      console.error("OTP resend failed:", err);
+      setError(err.message || "Failed to resend the code.");
     } finally {
       setLoading(false);
     }
@@ -241,7 +294,8 @@ const handleGoogleSignIn = async () => {
           {/* EMAIL STEP */}
           {step === "email" ? (
             <div className="space-y-5">
-              {/* Google Button */}
+              {/* Google is hidden until a Cognito domain and provider are configured. */}
+              {googleEnabled && <>
               <button
                 onClick={handleGoogleSignIn}
                 disabled={loading}
@@ -261,6 +315,7 @@ const handleGoogleSignIn = async () => {
                 <span className="text-xs text-white font-medium">OR</span>
                 <div className="flex-1 h-px bg-white/20"></div>
               </div>
+              </>}
 
               {/* Email Input */}
               <div className="space-y-2">
@@ -384,9 +439,7 @@ const handleGoogleSignIn = async () => {
               <div className="text-center">
                 <button
                   onClick={() => {
-                    setOtp("");
-                    setError("");
-                    handleSendOtp();
+                    handleResendOtp();
                   }}
                   disabled={loading}
                   className="text-sm text-purple-300 hover:text-white underline transition-colors disabled:opacity-50"

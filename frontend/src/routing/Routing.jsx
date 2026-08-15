@@ -12,6 +12,7 @@ import DocumentationPage from "../pages/Documentation";
 import HomePage from "../pages/Home";
 import UploadPage from "../pages/Upload";
 import AuthCallback from "../components/auth/AuthCallback";
+import ProtectedRoute from "../components/auth/ProtectedRoute";
 import NotFoundPage from "../pages/NotFound";
 // Lazy-loaded pages
 const ContactPage = lazy(() => import("../pages/Contact"));
@@ -56,9 +57,11 @@ const Routing = () => {
           path="/upload"
           element={
             <Suspense fallback={null}>
-              <Layout>
-                <UploadPage />
-              </Layout>
+              <ProtectedRoute>
+                <Layout>
+                  <UploadPage />
+                </Layout>
+              </ProtectedRoute>
             </Suspense>
           }
         />

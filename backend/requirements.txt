@@ -16,3 +16,5 @@ redis
 celery
 numpy<2
 mutagen
+pydub
+PyJWT[crypto]>=2.10.1,<3

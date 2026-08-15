@@ -29,8 +29,22 @@ async function downloadImage(url, filename, retries = 3) {
 // =====================================================================
 // Canvas Drawer (Zoom/Pan Logic)
 // =====================================================================
-function drawFrameToCanvas(ctx, img, progress, type) {
-  const { width: imgW, height: imgH } = img;
+function normalizeCrop(img, panelBBox) {
+  if (!Array.isArray(panelBBox) || panelBBox.length !== 4) {
+    return { x: 0, y: 0, width: img.width, height: img.height };
+  }
+
+  const [x1, y1, x2, y2] = panelBBox.map(Number);
+  const x = Math.max(0, Math.min(x1, img.width - 1));
+  const y = Math.max(0, Math.min(y1, img.height - 1));
+  const width = Math.max(1, Math.min(x2, img.width) - x);
+  const height = Math.max(1, Math.min(y2, img.height) - y);
+  return { x, y, width, height };
+}
+
+function drawFrameToCanvas(ctx, img, crop, progress, type) {
+  const imgW = crop.width;
+  const imgH = crop.height;
   
   // Clear background
   ctx.fillStyle = 'black';
@@ -48,15 +62,19 @@ function drawFrameToCanvas(ctx, img, progress, type) {
     let drawY = 0 - (hiddenHeight * progress);
     if (hiddenHeight <= 0) drawY = (CANVAS_HEIGHT - scaledH) / 2;
 
-    ctx.drawImage(img, destX, drawY, contentWidth, scaledH);
+    ctx.drawImage(
+      img,
+      crop.x, crop.y, crop.width, crop.height,
+      destX, drawY, contentWidth, scaledH,
+    );
   } 
   else {
     // Zoom Effect
     const zoomLevel = 1.0 + (0.15 * progress); 
     const srcW = imgW / zoomLevel;
     const srcH = imgH / zoomLevel;
-    const srcX = (imgW - srcW) / 2;
-    const srcY = (imgH - srcH) / 2;
+    const srcX = crop.x + ((imgW - srcW) / 2);
+    const srcY = crop.y + ((imgH - srcH) / 2);
 
     const imgAspect = imgW / imgH;
     let drawW = contentWidth;
@@ -67,8 +85,8 @@ function drawFrameToCanvas(ctx, img, progress, type) {
   }
 }
 
-function determineEffectType(img) {
-  const imageAspect = img.height / img.width;
+function determineEffectType(crop) {
+  const imageAspect = crop.height / crop.width;
   const contentAspect = CANVAS_HEIGHT / CANVAS_WIDTH;
   return (imageAspect > contentAspect * 1.5) ? 'pan_down' : 'zoom';
 }
@@ -76,12 +94,17 @@ function determineEffectType(img) {
 // =====================================================================
 // Audio Processor
 // =====================================================================
-async function processAudio(audioUrl, muxer) {
+async function loadAudio(audioUrl) {
   const response = await fetch(audioUrl);
+  if (!response.ok) throw new Error(`Audio download failed: HTTP ${response.status}`);
   const arrayBuffer = await response.arrayBuffer();
   const audioCtx = new AudioContext();
   const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
-  
+  await audioCtx.close();
+  return audioBuffer;
+}
+
+async function processAudio(audioBuffer, muxer) {
   const audioEncoder = new AudioEncoder({
     output: (chunk, meta) => muxer.addAudioChunk(chunk, meta),
     error: (e) => console.error(e)
@@ -127,7 +150,6 @@ async function processAudio(audioUrl, muxer) {
   }
 
   await audioEncoder.flush();
-  audioCtx.close();
 }
 
 // =====================================================================
@@ -145,10 +167,22 @@ export async function generateVideoFromScenes({
   try {
     log('[WebCodecs] Starting optimized generation...');
 
+    if (!Array.isArray(scenes) || scenes.length === 0) {
+      throw new Error('No video segments were provided');
+    }
+
+    const audioBuffer = audioUrl ? await loadAudio(audioUrl) : null;
+
     const muxer = new Mp4Muxer.Muxer({
       target: new Mp4Muxer.ArrayBufferTarget(),
       video: { codec: 'avc', width: CANVAS_WIDTH, height: CANVAS_HEIGHT },
-      audio: { codec: 'aac', numberOfChannels: 2, sampleRate: 44100 },
+      ...(audioBuffer ? {
+        audio: {
+          codec: 'aac',
+          numberOfChannels: audioBuffer.numberOfChannels,
+          sampleRate: audioBuffer.sampleRate,
+        },
+      } : {}),
       fastStart: 'in-memory',
     });
 
@@ -178,7 +212,7 @@ export async function generateVideoFromScenes({
       imageBitmaps.push(bmp);
     }
     
-    let globalTimestampMicro = 0;
+    let renderedFrames = 0;
     
     // 2. Render Loop (Optimized)
     for (let i = 0; i < scenes.length; i++) {
@@ -188,19 +222,29 @@ export async function generateVideoFromScenes({
       imgIdx = Math.min(imgIdx, imageBitmaps.length - 1);
 
       const img = imageBitmaps[imgIdx];
-      const effectType = determineEffectType(img);
-      const durationSec = scene.duration || 3.0;
-      const totalFrames = Math.ceil(durationSec * FPS);
+      const crop = normalizeCrop(img, scene.panel_bbox);
+      const effectType = scene.animation_type || determineEffectType(crop);
+      const fallbackStart = renderedFrames / FPS;
+      const startTime = Number.isFinite(Number(scene.start_time))
+        ? Number(scene.start_time)
+        : fallbackStart;
+      const durationSec = Number(scene.duration) > 0 ? Number(scene.duration) : 3.0;
+      const endTime = Number.isFinite(Number(scene.end_time))
+        ? Number(scene.end_time)
+        : startTime + durationSec;
+      const startFrame = Math.max(renderedFrames, Math.round(startTime * FPS));
+      const endFrame = Math.max(startFrame + 1, Math.round(endTime * FPS));
+      const totalFrames = endFrame - startFrame;
 
       log(`[Render] Scene ${i + 1}/${scenes.length}: ${durationSec}s (${totalFrames} frames)`);
 
       for (let frame = 0; frame < totalFrames; frame++) {
         const progress = frame / totalFrames;
 
-        drawFrameToCanvas(ctx, img, progress, effectType);
+        drawFrameToCanvas(ctx, img, crop, progress, effectType);
 
         const videoFrame = new VideoFrame(canvas, {
-          timestamp: globalTimestampMicro,
+          timestamp: (renderedFrames * 1_000_000) / FPS,
           duration: 1000000 / FPS 
         });
 
@@ -212,7 +256,7 @@ export async function generateVideoFromScenes({
         videoEncoder.encode(videoFrame, { keyFrame: frame % 60 === 0 });
         videoFrame.close();
 
-        globalTimestampMicro += (1000000 / FPS);
+        renderedFrames += 1;
         
         // ⚡ FIX 3: Critical yield to Main Thread to prevent browser hang
         if (frame % 10 === 0) {
@@ -224,10 +268,10 @@ export async function generateVideoFromScenes({
     }
 
     // 3. Audio Encoding
-    if (audioUrl) {
+    if (audioBuffer) {
       log('[Audio] Mixing audio...');
       try {
-        await processAudio(audioUrl, muxer);
+        await processAudio(audioBuffer, muxer);
       } catch (e) {
         log('[Audio] Error: ' + e.message);
       }
@@ -246,7 +290,7 @@ export async function generateVideoFromScenes({
     if (onProgress) onProgress(100);
     log('[Done] Video created!');
 
-    return { videoUrl, blob, duration: globalTimestampMicro / 1000000 };
+    return { videoUrl, blob, duration: renderedFrames / FPS };
 
   } catch (error) {
     console.error(error);

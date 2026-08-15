@@ -20,8 +20,8 @@ import {
   Minimize,
 } from "lucide-react";
 
-import { generateAudioStory, checkTaskStatus } from '../api/api';
-import { generateVideoFromScenes, downloadVideo } from '../utils/videoMaker';
+import { ApiError, generateAudioStory, checkTaskStatus } from '../api/api';
+import { generateVideoFromScenes } from '../utils/videoMaker';
 
 const UploadPage = () => {
   const [file, setFile] = useState(null);
@@ -38,8 +38,6 @@ const UploadPage = () => {
   const [isGeneratingVideo, setIsGeneratingVideo] = useState(false);
   const [videoProgress, setVideoProgress] = useState(0);
   const [videoLogs, setVideoLogs] = useState([]);
-  const [isFullscreen, setIsFullscreen] = useState(false);
-  const [maxVideoProgress, setMaxVideoProgress] = useState(0);
   const [isDownloading, setIsDownloading] = useState(false);
 
   const fileInputRef = useRef(null);
@@ -49,7 +47,7 @@ const UploadPage = () => {
 
   const navigate = useNavigate();
   const location = useLocation();
-  const { user } = useAuth();
+  const { user, logout } = useAuth();
 
   // Restore session data on mount
   useEffect(() => {
@@ -127,7 +125,6 @@ const UploadPage = () => {
         onProgress: (p) => {
           const safeProgress = Math.min(Math.floor(p), 100);
           setVideoProgress(safeProgress);
-          setMaxVideoProgress(safeProgress);
         },
         onLog: (msg) => setVideoLogs(prev => [...prev, msg]),
       });
@@ -135,7 +132,6 @@ const UploadPage = () => {
       setVideoUrl(result.videoUrl);
       setVideoBlob(result.blob);
       setVideoProgress(100);
-      setMaxVideoProgress(100);
 
       setTimeout(() => {
         setIsGeneratingVideo(false);
@@ -148,7 +144,6 @@ const UploadPage = () => {
       setError(err.message || "Video generation failed");
       setIsGeneratingVideo(false);
       setVideoProgress(0);
-      setMaxVideoProgress(0);
       showToast.error(err.message || "Video generation failed");
     }
   };
@@ -306,15 +301,28 @@ const UploadPage = () => {
           else if (statusData.state === 'FAILURE') {
             hasCompleted = true; // Mark as completed immediately
             clearInterval(pollInterval);
-            throw new Error(statusData.error || "Generation Failed");
+            const failureMessage = statusData.error || "Generation Failed";
+            setError(failureMessage);
+            setIsProcessing(false);
+            showToast.error(failureMessage);
           }
         } catch (err) {
           console.error("Polling Error:", err);
-          // Don't stop polling on network hiccups, only on fatal errors
-          if (err.message.includes("Backend returned non-JSON")) {
+          // Stop on a deliberate backend error; transient fetch failures may retry.
+          if (err instanceof ApiError) {
             clearInterval(pollInterval);
-            setError("Server Error: " + err.message);
+            hasCompleted = true;
+            setError(err.message);
             setIsProcessing(false);
+            showToast.error(err.message);
+
+            if (err.status === 401) {
+              await logout().catch(() => {});
+              navigate("/login", {
+                replace: true,
+                state: { from: { pathname: location.pathname } },
+              });
+            }
           }
         }
       }, 2000); // Check every 2 seconds
@@ -325,6 +333,14 @@ const UploadPage = () => {
       setIsProcessing(false);
       setProgress(0);
       showToast.error(err.message || "Story generation failed");
+
+      if (err instanceof ApiError && err.status === 401) {
+        await logout().catch(() => {});
+        navigate("/login", {
+          replace: true,
+          state: { from: { pathname: location.pathname } },
+        });
+      }
     }
   };
 
@@ -345,7 +361,6 @@ const UploadPage = () => {
 
     setIsGeneratingVideo(true);
     setVideoProgress(0);
-    setMaxVideoProgress(0);
     setVideoLogs([]);
     setError(null);
 
@@ -408,7 +423,6 @@ const UploadPage = () => {
             sessionStorage.setItem("videoProgress", newProgress.toString());
             return newProgress;
           });
-          setMaxVideoProgress(prev => Math.max(prev, safeProgress));
         },
         onLog: (msg) => {
           console.log("[VideoMaker]", msg);
@@ -424,7 +438,6 @@ const UploadPage = () => {
       setVideoUrl(result.videoUrl);
       setVideoBlob(result.blob);
       setVideoProgress(100);
-      setMaxVideoProgress(100);
       sessionStorage.setItem("videoProgress", "100");
 
       setTimeout(() => {
@@ -543,18 +556,6 @@ const UploadPage = () => {
       setIsDownloading(false);
     }
   };
-
-  useEffect(() => {
-    const handleFullscreenChange = () => {
-      setIsFullscreen(!!(document.fullscreenElement || document.webkitFullscreenElement));
-    };
-    document.addEventListener('fullscreenchange', handleFullscreenChange);
-    document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
-    return () => {
-      document.removeEventListener('fullscreenchange', handleFullscreenChange);
-      document.removeEventListener('webkitfullscreenchange', handleFullscreenChange);
-    };
-  }, []);
 
   return (
     <main className="relative w-full min-h-screen text-white px-3 sm:px-4 md:px-6 lg:px-8 py-6 sm:py-8 overflow-hidden">

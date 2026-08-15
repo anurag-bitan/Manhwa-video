@@ -1,18 +1,19 @@
-from fastapi import FastAPI
-from db.supabase import supabase  # this imports our client
-import sys
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from api.routers import upload 
 from api.routers import jobs  
+from core.auth import AuthenticatedUser, get_current_user
+from core.config import settings
+from db.supabase_admin import supabase_admin
 
 app = FastAPI(title="Manhwa Video Backend")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=settings.cors_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 
@@ -29,11 +30,13 @@ async def health():
     return {"status": "ok"}
 
 @app.get("/db-test")
-async def db_test():
+async def db_test(
+    _current_user: AuthenticatedUser = Depends(get_current_user),
+):
     # Try a simple query to see if Supabase works
     try:
         # Fetch one row from processing_jobs (might be empty)
-        data = supabase.table("processing_jobs").select("*").limit(1).execute()
+        data = supabase_admin.table("processing_jobs").select("id").limit(1).execute()
         return {"db_connected": True, "rows": len(data.data)}
-    except Exception as e:
-        return {"db_connected": False, "error": str(e)}
+    except Exception:
+        return {"db_connected": False}

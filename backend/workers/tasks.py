@@ -160,8 +160,9 @@ def extract_pages_task(self, pdf_storage_path: str, job_id: str):
                 print(f"Page {page_num} already exists, skipping upload.")
             else:
                 raise
-        page_url = supabase_admin.storage.from_("pages").get_public_url(storage_path)
-        page_data_list.append({"url": page_url, "path": storage_path})
+        # Persist object paths, not public URLs. The authenticated assets route
+        # creates short-lived signed URLs after confirming job ownership.
+        page_data_list.append({"path": storage_path})
 
     pdf.close()
     return page_data_list
