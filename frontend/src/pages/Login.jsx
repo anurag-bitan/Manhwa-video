@@ -1,8 +1,16 @@
 import React, { useState, useEffect, useRef } from "react";
-import { useAuth } from "../context/AuthContext";
+import { useAuth } from "../context/useAuth";
 import { useNavigate, useLocation } from "react-router-dom";
-import { Mail, Loader2, ArrowLeft, Shield, Lock } from "lucide-react";
-import Swal from "sweetalert2";
+import {
+  AlertCircle,
+  ArrowLeft,
+  Loader2,
+  Lock,
+  Mail,
+  Shield,
+  X,
+} from "lucide-react";
+import { showToast } from "../utils/toast";
 
 function resolveRedirect(value) {
   const pathname = typeof value === "string" ? value : value?.pathname;
@@ -31,6 +39,52 @@ function readSavedRedirect() {
   }
 }
 
+function createUiError(title, message) {
+  return { title, message };
+}
+
+const AuthAlert = ({ error, onAction, onDismiss }) => {
+  if (!error) return null;
+
+  return (
+    <div
+      id="auth-error"
+      role="alert"
+      aria-live="assertive"
+      className="rounded-xl border border-red-400/30 bg-red-500/15 p-4 text-left backdrop-blur-sm"
+    >
+      <div className="flex items-start gap-3">
+        <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-red-300" />
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-semibold text-red-100">
+            {error.title || "Authentication failed"}
+          </p>
+          <p className="mt-1 text-sm leading-5 text-red-200/90">
+            {error.message}
+          </p>
+          {error.action && error.actionLabel && (
+            <button
+              type="button"
+              onClick={() => onAction(error.action)}
+              className="mt-3 text-sm font-semibold text-white underline decoration-red-300/60 underline-offset-4 hover:decoration-white"
+            >
+              {error.actionLabel}
+            </button>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={onDismiss}
+          aria-label="Dismiss authentication error"
+          className="rounded-lg p-1 text-red-200/70 transition-colors hover:bg-white/10 hover:text-white"
+        >
+          <X className="h-4 w-4" />
+        </button>
+      </div>
+    </div>
+  );
+};
+
 const Login = () => {
   const {
     sendOtp,
@@ -43,10 +97,11 @@ const Login = () => {
   const location = useLocation();
 
   const [step, setStep] = useState("email");
+  const [authMode, setAuthMode] = useState("signIn");
   const [loading, setLoading] = useState(false);
   const [email, setEmail] = useState("");
   const [otp, setOtp] = useState("");
-  const [error, setError] = useState("");
+  const [error, setError] = useState(null);
   
   // ✅ SAFE redirect resolution
   const from =
@@ -56,49 +111,62 @@ const Login = () => {
 
   const otpInputs = useRef([]);
 
+  const changeAuthMode = (nextMode) => {
+    setAuthMode(nextMode);
+    setError(null);
+    setOtp("");
+  };
+
+  const handleAuthErrorAction = (nextMode) => {
+    changeAuthMode(nextMode);
+    setStep("email");
+  };
+
   /* ---------------- Send OTP ---------------- */
   const handleSendOtp = async (e) => {
     e?.preventDefault();
     
     if (!email) {
-      setError("Please enter your email");
+      setError(createUiError("Email required", "Enter your email to continue."));
       return;
     }
 
     // Basic email validation
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     if (!emailRegex.test(email)) {
-      setError("Please enter a valid email address");
+      setError(
+        createUiError(
+          "Invalid email",
+          "Enter a complete email address such as you@example.com.",
+        ),
+      );
       return;
     }
 
     setLoading(true);
-    setError("");
+    setError(null);
 
     try {
-      const { error } = await sendOtp(email);
+      const { error: authError } = await sendOtp(email, authMode);
       
-      if (error) {
-        console.error("OTP Send Error:", error);
-        throw error;
+      if (authError) {
+        setError(authError);
+        return;
       }
 
       setStep("otp");
-      
-      Swal.fire({
-        icon: 'success',
-        title: 'Code Sent!',
-        text: 'Please check your email (and spam folder) for the 6-digit code.',
-        background: 'transparent',
-        color: '#fff',
-        timer: 4000,
-        showConfirmButton: false,
-        iconColor: '#a78bfa',
-        backdrop: 'rgba(0,0,0,0.4)'
-      });
+      showToast.success(
+        authMode === "signUp"
+          ? "Account code sent. Check your email and spam folder."
+          : "Sign-in code sent. Check your email and spam folder.",
+      );
     } catch (err) {
-      console.error("Error details:", err);
-      setError(err.message || "Failed to send code. Please try again.");
+      setError(
+        createUiError(
+          "Could not send code",
+          err?.message || "Please try again in a moment.",
+        ),
+      );
     } finally {
       setLoading(false);
     }
@@ -109,43 +177,50 @@ const Login = () => {
     e?.preventDefault();
 
     if (otp.length !== 6) {
-      setError("Please enter all 6 digits");
+      setError(
+        createUiError("Incomplete code", "Enter all six verification digits."),
+      );
       return;
     }
 
     setLoading(true);
-    setError("");
+    setError(null);
 
     try {
       const { data, error } = await verifyOtp(email, otp);
       
       if (error) {
-        console.error("OTP Verify Error:", error);
-        throw error;
+        setError(error);
+        setOtp("");
+        otpInputs.current[0]?.focus();
+        return;
+      }
+
+      if (data.newSignInCodeSent) {
+        setOtp("");
+        otpInputs.current[0]?.focus();
+        showToast.info(
+          "Account confirmed. Enter the fresh sign-in code we just emailed you.",
+        );
+        return;
       }
 
       if (data.session) {
-        Swal.fire({
-          icon: 'success',
-          title: 'Success!',
-          text: 'Login successful. Redirecting...',
-          background: 'transparent',
-          color: '#fff',
-          timer: 1500,
-          showConfirmButton: false,
-          iconColor: '#a78bfa',
-          backdrop: 'rgba(0,0,0,0.4)'
-        });
+        showToast.success("Signed in successfully.");
 
         setTimeout(() => {
           navigate(from, { replace: true });
-        }, 1500);
+        }, 600);
       }
     } catch (err) {
-      console.error("Verification error:", err);
-      setError(err.message || "Invalid code. Please try again.");
-      setOtp(""); // Clear OTP on error
-      otpInputs.current[0]?.focus(); // Focus first input
+      setError(
+        createUiError(
+          "Verification failed",
+          err?.message || "Request a new code and try again.",
+        ),
+      );
+      setOtp("");
+      otpInputs.current[0]?.focus();
     } finally {
       setLoading(false);
     }
@@ -153,69 +228,61 @@ const Login = () => {
 
   const handleResendOtp = async () => {
     setLoading(true);
-    setError("");
+    setError(null);
     setOtp("");
 
     try {
       const { error: resendError } = await resendOtp(email);
-      if (resendError) throw resendError;
+      if (resendError) {
+        setError(resendError);
+        return;
+      }
 
-      Swal.fire({
-        icon: "success",
-        title: "Code Resent!",
-        text: "Check your email and spam folder for the new code.",
-        background: "transparent",
-        color: "#fff",
-        timer: 3000,
-        showConfirmButton: false,
-        iconColor: "#a78bfa",
-        backdrop: "rgba(0,0,0,0.4)",
-      });
+      showToast.success("A new code was sent. Check your email and spam folder.");
     } catch (err) {
-      console.error("OTP resend failed:", err);
-      setError(err.message || "Failed to resend the code.");
+      setError(
+        createUiError(
+          "Could not resend code",
+          err?.message || "Please wait a moment and try again.",
+        ),
+      );
     } finally {
       setLoading(false);
     }
   };
 
   /* ---------------- Google Sign In ---------------- */
-const handleGoogleSignIn = async () => {
-  try {
-    setLoading(true);
-    setError("");
-    console.log("🚀 Initiating Google Sign In...");
+  const handleGoogleSignIn = async () => {
+    try {
+      setLoading(true);
+      setError(null);
 
-    // Save redirect location
-    sessionStorage.setItem(
-      "auth_redirect",
-      JSON.stringify({
-        pathname: location.state?.from?.pathname || "/upload",
-        search: location.state?.from?.search || "",
-        state: location.state?.from?.state || null,
-      })
-    );
+      const [pathname, query = ""] = from.split("?", 2);
+      sessionStorage.setItem(
+        "auth_redirect",
+        JSON.stringify({
+          pathname,
+          search: query ? `?${query}` : "",
+          state: null,
+        }),
+      );
     
-    // Get dynamic callback URL
-    const redirectUrl = `${window.location.origin}/auth/callback`;
-    console.log("🔗 OAuth Redirect URL:", redirectUrl);
+      const { error: authError } = await signInWithGoogle();
     
-    const { data, error } = await signInWithGoogle(redirectUrl);
-    
-    if (error) {
-      console.error("❌ Google Sign In Error:", error);
-      throw error;
+      if (authError) {
+        setError(authError);
+        setLoading(false);
+      }
+    } catch (err) {
+      setError(
+        createUiError(
+          "Google sign-in failed",
+          err?.message || "Please try again.",
+        ),
+      );
+      setLoading(false);
     }
-
-    console.log("✅ Google Sign In Response:", data);
-    
-    // OAuth will redirect automatically
-  } catch (err) {
-    console.error("❌ Error:", err);
-    setError(err.message || "Failed to sign in with Google");
-    setLoading(false);
-  }
-};
+  };
 
   /* ---------------- OTP Input Handlers ---------------- */
   const handleOtpChange = (index, value) => {
@@ -250,6 +317,7 @@ const handleGoogleSignIn = async () => {
 
   const handleKeyPress = (e) => {
     if (e.key === 'Enter') {
+      e.preventDefault();
       if (step === 'email') {
         handleSendOtp();
       } else if (otp.length === 6) {
@@ -282,11 +350,17 @@ const handleGoogleSignIn = async () => {
               <Shield className="w-8 h-8 text-white" />
             </div>
             <h1 className="text-2xl sm:text-3xl md:text-4xl font-bold text-white mb-2">
-              {step === "email" ? "Welcome Back" : "Verify Login"}
+              {step === "otp"
+                ? "Check your email"
+                : authMode === "signIn"
+                  ? "Welcome back"
+                  : "Create your account"}
             </h1>
             <p className="text-md font-semibold text-purple-400/80">
               {step === "email"
-                ? "Sign in to Manhwa AI for free"
+                ? authMode === "signIn"
+                  ? "Sign in to continue to Manhwa AI"
+                  : "Start creating with Manhwa AI"
                 : `Code sent to ${email}`}
             </p>
           </div>
@@ -294,6 +368,41 @@ const handleGoogleSignIn = async () => {
           {/* EMAIL STEP */}
           {step === "email" ? (
             <div className="space-y-5">
+              <div
+                role="tablist"
+                aria-label="Choose sign in or account creation"
+                className="grid grid-cols-2 rounded-xl border border-white/15 bg-black/15 p-1"
+              >
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={authMode === "signIn"}
+                  onClick={() => changeAuthMode("signIn")}
+                  disabled={loading}
+                  className={`rounded-lg px-3 py-2.5 text-sm font-semibold transition-all ${
+                    authMode === "signIn"
+                      ? "bg-white/15 text-white shadow-sm"
+                      : "text-purple-200/70 hover:text-white"
+                  }`}
+                >
+                  Sign in
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={authMode === "signUp"}
+                  onClick={() => changeAuthMode("signUp")}
+                  disabled={loading}
+                  className={`rounded-lg px-3 py-2.5 text-sm font-semibold transition-all ${
+                    authMode === "signUp"
+                      ? "bg-white/15 text-white shadow-sm"
+                      : "text-purple-200/70 hover:text-white"
+                  }`}
+                >
+                  Create account
+                </button>
+              </div>
+
               {/* Google is hidden until a Cognito domain and provider are configured. */}
               {googleEnabled && <>
               <button
@@ -330,21 +439,23 @@ const handleGoogleSignIn = async () => {
                     value={email}
                     onChange={(e) => {
                       setEmail(e.target.value);
-                      setError(""); // Clear error on input
+                      setError(null);
                     }}
-                    onKeyPress={handleKeyPress}
+                    onKeyDown={handleKeyPress}
                     placeholder="you@example.com"
+                    aria-invalid={Boolean(error)}
+                    aria-describedby={error ? "auth-error" : undefined}
                     className="w-full rounded-xl bg-transparent backdrop-blur-sm border border-white/20 py-3.5 pl-12 pr-4 text-white placeholder-gray-300/50 focus:outline-none focus:border-purple-400 focus:ring-2 focus:ring-purple-400/30 transition-all"
                     autoFocus
                   />
                 </div>
               </div>
 
-              {error && (
-                <div className="text-sm text-red-300 bg-red-500/20 backdrop-blur-sm p-3 rounded-lg border border-red-400/30 text-center">
-                  {error}
-                </div>
-              )}
+              <AuthAlert
+                error={error}
+                onAction={handleAuthErrorAction}
+                onDismiss={() => setError(null)}
+              />
 
               <button
                 onClick={handleSendOtp}
@@ -357,7 +468,9 @@ const handleGoogleSignIn = async () => {
                     Sending...
                   </>
                 ) : (
-                  "Continue with Email"
+                  authMode === "signIn"
+                    ? "Send sign-in code"
+                    : "Create account & send code"
                 )}
               </button>
 
@@ -392,8 +505,12 @@ const handleGoogleSignIn = async () => {
                       maxLength={1}
                       value={otp[index] || ''}
                       onChange={(e) => handleOtpChange(index, e.target.value)}
-                      onKeyDown={(e) => handleOtpKeyDown(index, e)}
-                      onKeyPress={handleKeyPress}
+                      onKeyDown={(event) => {
+                        handleOtpKeyDown(index, event);
+                        handleKeyPress(event);
+                      }}
+                      aria-invalid={Boolean(error)}
+                      aria-describedby={error ? "auth-error" : undefined}
                       className="w-12 h-14 sm:w-14 sm:h-16 text-center text-2xl font-bold rounded-xl bg-white/10 backdrop-blur-sm border-2 border-white/20 text-white focus:outline-none focus:border-purple-400 focus:ring-2 focus:ring-purple-400/30 transition-all"
                       required
                     />
@@ -401,11 +518,11 @@ const handleGoogleSignIn = async () => {
                 </div>
               </div>
 
-              {error && (
-                <div className="text-sm text-red-300 bg-red-500/20 backdrop-blur-sm p-3 rounded-lg border border-red-400/30 text-center">
-                  {error}
-                </div>
-              )}
+              <AuthAlert
+                error={error}
+                onAction={handleAuthErrorAction}
+                onDismiss={() => setError(null)}
+              />
 
               <button
                 onClick={handleVerifyOtp}
@@ -426,7 +543,7 @@ const handleGoogleSignIn = async () => {
                 onClick={() => {
                   setStep("email");
                   setOtp("");
-                  setError("");
+                  setError(null);
                 }}
                 disabled={loading}
                 className="w-full text-sm text-purple-200 hover:text-white flex items-center justify-center gap-2 py-2 transition-colors disabled:opacity-50"

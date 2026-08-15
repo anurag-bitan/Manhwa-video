@@ -1,7 +1,11 @@
 import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Loader2, CheckCircle, XCircle } from "lucide-react";
-import { useAuth } from "../../context/AuthContext";
+import { useAuth } from "../../context/useAuth";
+import { normalizeAuthError } from "../../lib/authErrors";
+
+const wait = (milliseconds) =>
+  new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 
 const AuthCallback = () => {
   const navigate = useNavigate();
@@ -12,15 +16,34 @@ const AuthCallback = () => {
   useEffect(() => {
     if (loading) return;
 
+    let cancelled = false;
+    let redirectTimer;
+
     const finish = async () => {
-      if (!user) {
-        await refreshUser();
+      const query = new URLSearchParams(window.location.search);
+      if (query.has("error")) {
+        const oauthError = new Error("Google sign-in was not completed.");
+        oauthError.name = "OAuthSignInException";
+        throw oauthError;
       }
 
-      setStatus("success");
-      setMessage("Authentication successful! Redirecting...");
+      let currentUser = user;
+      for (let attempt = 0; !currentUser && attempt < 8; attempt += 1) {
+        currentUser = await refreshUser();
+        if (!currentUser) await wait(350);
+      }
 
-      setTimeout(() => {
+      if (!currentUser) {
+        const oauthError = new Error("No Cognito session was created.");
+        oauthError.name = "OAuthSignInException";
+        throw oauthError;
+      }
+
+      if (cancelled) return;
+      setStatus("success");
+      setMessage("Google sign-in succeeded. Redirecting...");
+
+      redirectTimer = window.setTimeout(() => {
         const saved = sessionStorage.getItem("auth_redirect");
         sessionStorage.removeItem("auth_redirect");
 
@@ -42,11 +65,23 @@ const AuthCallback = () => {
     };
 
     finish().catch((error) => {
-      console.error("Cognito callback failed:", error);
+      if (cancelled) return;
+      const publicError = normalizeAuthError(error, {
+        fallbackTitle: "Google sign-in failed",
+        fallbackMessage: "Return to sign in and try again.",
+      });
       setStatus("error");
-      setMessage(error.message || "Authentication failed");
-      setTimeout(() => navigate("/login", { replace: true }), 2500);
+      setMessage(publicError.message);
+      redirectTimer = window.setTimeout(
+        () => navigate("/login", { replace: true }),
+        4000,
+      );
     });
+
+    return () => {
+      cancelled = true;
+      if (redirectTimer) window.clearTimeout(redirectTimer);
+    };
   }, [loading, navigate, refreshUser, user]);
 
   return (
@@ -72,6 +107,15 @@ const AuthCallback = () => {
               {status === "error" && "Authentication Failed"}
             </h2>
             <p className="text-purple-200">{message}</p>
+            {status === "error" && (
+              <button
+                type="button"
+                onClick={() => navigate("/login", { replace: true })}
+                className="mt-5 rounded-xl bg-white/10 px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-white/20"
+              >
+                Back to sign in
+              </button>
+            )}
           </div>
         </div>
       </div>

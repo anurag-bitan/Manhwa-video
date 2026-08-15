@@ -82,6 +82,86 @@ frontend configuration).
 10. Copy the **User pool ID** and **App client ID**. The client ID is public; a
     client secret must not exist for this browser client.
 
+## Google sign-in through Cognito
+
+Google sign-in uses Cognito's OAuth authorization-code flow with PKCE. The
+browser redirects to Google through the Cognito user-pool domain; the Google
+client secret is stored only in Cognito and never in this repository or an
+Amplify environment variable.
+
+### 1. Create the Google OAuth client
+
+1. In Google Cloud Console, select or create a project.
+2. Configure the OAuth consent screen. While the app is in testing, add every
+   Google account that should be allowed to sign in as a test user.
+3. Create an OAuth 2.0 client ID with application type **Web application**.
+4. In Cognito, create/select the user-pool domain first. Then add this exact
+   Google **Authorized redirect URI**:
+
+   ```text
+   https://YOUR_COGNITO_DOMAIN/oauth2/idpresponse
+   ```
+
+5. Copy the Google client ID and client secret for the Cognito configuration.
+
+The Google redirect URI points to Cognito, not to Amplify. Do not add the
+Google client secret to `VITE_*`, GitHub, or the frontend source.
+
+### 2. Configure Google and OAuth in Cognito
+
+1. Open the existing user pool in `eu-north-1` and create a Cognito domain
+   under **Domain**. Record its hostname without `https://`.
+2. Under **Social and external providers**, add **Google** with the Google
+   client ID and secret. Request `openid email profile` and map Google's email
+   claim to the mutable Cognito `email` attribute.
+3. Open the existing public SPA app client and edit its managed-login/login-page
+   configuration. Enable Google as an identity provider.
+4. Enable only **Authorization code grant** for this browser flow and allow the
+   `openid`, `email`, and `profile` scopes.
+5. Register all exact callback URLs that will initiate sign-in:
+
+   ```text
+   http://localhost:5173/auth/callback
+   https://YOUR_AMPLIFY_DOMAIN/auth/callback
+   https://YOUR_CUSTOM_DOMAIN/auth/callback
+   ```
+
+6. Register the corresponding sign-out URLs:
+
+   ```text
+   http://localhost:5173/login
+   https://YOUR_AMPLIFY_DOMAIN/login
+   https://YOUR_CUSTOM_DOMAIN/login
+   ```
+
+Only keep URLs for environments that actually exist. Production callback URLs
+must use HTTPS; Cognito permits HTTP only for localhost development.
+
+### 3. Enable Google in the frontend host
+
+Set these two Amplify branch environment variables, then redeploy the branch:
+
+```dotenv
+VITE_COGNITO_GOOGLE_ENABLED=true
+VITE_COGNITO_DOMAIN=YOUR_COGNITO_DOMAIN
+```
+
+`VITE_COGNITO_DOMAIN` is a hostname such as
+`manhwa-auth.auth.eu-north-1.amazoncognito.com`, without a protocol or trailing
+slash. The application derives its callback and sign-out URLs from the current
+browser origin, so the matching URLs must already be registered on the Cognito
+app client.
+
+### Existing email users and Google
+
+Cognito does not automatically merge a native email-OTP user with a new Google
+federated identity that has the same email. Test with a new Google account
+first. If one person must use both methods while retaining one Cognito `sub`,
+link the Google identity to the existing profile with a carefully reviewed
+`AdminLinkProviderForUser` workflow before the first Google sign-in. Do not
+automatically link accounts from an untrusted email claim: linking grants the
+external identity access to the existing account.
+
 ## Environment variables
 
 Frontend (`frontend/.env` locally and the frontend host in production):
@@ -92,6 +172,7 @@ VITE_COGNITO_REGION=eu-north-1
 VITE_COGNITO_USER_POOL_ID=eu-north-1_EXAMPLE
 VITE_COGNITO_CLIENT_ID=exampleclientid
 VITE_COGNITO_GOOGLE_ENABLED=false
+VITE_COGNITO_DOMAIN=your-prefix.auth.eu-north-1.amazoncognito.com
 ```
 
 Backend (`backend/.env` locally and a secret/config service in production):

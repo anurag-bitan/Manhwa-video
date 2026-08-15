@@ -1,7 +1,5 @@
 import React, {
-  createContext,
   useCallback,
-  useContext,
   useEffect,
   useState,
 } from "react";
@@ -13,37 +11,19 @@ import {
   getCurrentUser,
   resendSignUpCode,
   signIn,
+  signInWithRedirect,
   signOut,
   signUp,
 } from "aws-amplify/auth";
 import { Hub } from "aws-amplify/utils";
 import { cognitoConfig } from "../lib/cognitoClient";
+import { normalizeAuthError } from "../lib/authErrors";
+import { AuthContextValue } from "./authContextValue";
 
-const AuthContext = createContext();
 const AUTH_FLOW_KEY = "cognito_email_auth_flow";
 
 function normalizeEmail(email) {
   return email.trim().toLowerCase();
-}
-
-function getErrorName(error) {
-  const value = error?.name || error?.code || error?.__type || "";
-  return value.split("#").pop();
-}
-
-function toPublicError(error) {
-  if (error?.message === "password is required to signUp") {
-    return {
-      name: error?.name || "PasswordlessSignUpNotEnabled",
-      message:
-        "Cognito email OTP signup is not enabled. Enable Email message one-time password on the user pool and ALLOW_USER_AUTH on this app client.",
-    };
-  }
-
-  return {
-    name: error?.name || "CognitoAuthError",
-    message: error?.message || "Authentication failed",
-  };
 }
 
 async function readCurrentUser() {
@@ -67,9 +47,12 @@ export const AuthProvider = ({ children }) => {
 
   const refreshUser = useCallback(async () => {
     try {
-      setUser(await readCurrentUser());
+      const currentUser = await readCurrentUser();
+      setUser(currentUser);
+      return currentUser;
     } catch {
       setUser(null);
+      return null;
     } finally {
       setLoading(false);
     }
@@ -131,15 +114,21 @@ export const AuthProvider = ({ children }) => {
         error: null,
       };
     } catch (error) {
-      return { data: null, error: toPublicError(error) };
+      return { data: null, error: normalizeAuthError(error) };
     }
   };
 
-  const sendOtp = async (rawEmail) => {
+  const sendOtp = async (rawEmail, mode = "signIn") => {
     const email = normalizeEmail(rawEmail);
 
     try {
-      // Start with sign-up so one form works for both new and existing users.
+      if (mode === "signIn") {
+        return {
+          data: await startExistingUserSignIn(email),
+          error: null,
+        };
+      }
+
       const result = await signUp({
         username: email,
         options: {
@@ -157,36 +146,7 @@ export const AuthProvider = ({ children }) => {
       sessionStorage.setItem(AUTH_FLOW_KEY, "signUp");
       return { data: result, error: null };
     } catch (error) {
-      if (getErrorName(error) === "UsernameExistsException") {
-        try {
-          // A duplicate can be an unconfirmed account from a previous signup.
-          // Resend its confirmation code before trying the confirmed-user flow.
-          const result = await resendSignUpCode({ username: email });
-          sessionStorage.setItem(AUTH_FLOW_KEY, "signUp");
-          return { data: result, error: null };
-        } catch (resendError) {
-          const resendErrorName = getErrorName(resendError);
-          const canBeConfirmedUser = [
-            "InvalidParameterException",
-            "NotAuthorizedException",
-          ].includes(resendErrorName);
-
-          if (!canBeConfirmedUser) {
-            return { data: null, error: toPublicError(resendError) };
-          }
-
-          try {
-            return {
-              data: await startExistingUserSignIn(email),
-              error: null,
-            };
-          } catch (signInError) {
-            return { data: null, error: toPublicError(signInError) };
-          }
-        }
-      }
-
-      return { data: null, error: toPublicError(error) };
+      return { data: null, error: normalizeAuthError(error) };
     }
   };
 
@@ -211,9 +171,10 @@ export const AuthProvider = ({ children }) => {
           }
         } else if (confirmation.nextStep.signUpStep === "DONE") {
           await startExistingUserSignIn(email);
-          throw new Error(
-            "Account confirmed. Cognito sent a new sign-in code; enter that new code.",
-          );
+          return {
+            data: { session: false, newSignInCodeSent: true },
+            error: null,
+          };
         } else {
           throw new Error(
             `Cognito returned an unexpected confirmation step: ${confirmation.nextStep.signUpStep}`,
@@ -227,24 +188,40 @@ export const AuthProvider = ({ children }) => {
           );
         }
       } else {
-        throw new Error("The email sign-in session expired. Request a new code.");
+        const expiredSession = new Error("The email sign-in session expired.");
+        expiredSession.name = "EmailSignInSessionExpired";
+        throw expiredSession;
       }
 
       sessionStorage.removeItem(AUTH_FLOW_KEY);
       await refreshUser();
       return { data: { session: true }, error: null };
     } catch (error) {
-      return { data: null, error: toPublicError(error) };
+      return { data: null, error: normalizeAuthError(error) };
     }
   };
 
-  const signInWithGoogle = async () => ({
-    data: null,
-    error: {
-      name: "GoogleNotConfigured",
-      message: "Google sign-in is not configured yet.",
-    },
-  });
+  const signInWithGoogle = async () => {
+    if (!cognitoConfig.googleEnabled) {
+      return {
+        data: null,
+        error: normalizeAuthError({ name: "OAuthNotConfigured" }),
+      };
+    }
+
+    try {
+      await signInWithRedirect({ provider: "Google" });
+      return { data: { redirecting: true }, error: null };
+    } catch (error) {
+      return {
+        data: null,
+        error: normalizeAuthError(error, {
+          fallbackTitle: "Google sign-in failed",
+          fallbackMessage: "We could not start Google sign-in. Please try again.",
+        }),
+      };
+    }
+  };
 
   const logout = async () => {
     sessionStorage.removeItem(AUTH_FLOW_KEY);
@@ -264,16 +241,8 @@ export const AuthProvider = ({ children }) => {
   };
 
   return (
-    <AuthContext.Provider value={value}>
+    <AuthContextValue.Provider value={value}>
       {!loading && children}
-    </AuthContext.Provider>
+    </AuthContextValue.Provider>
   );
-};
-
-export const useAuth = () => {
-  const context = useContext(AuthContext);
-  if (!context) {
-    throw new Error("useAuth must be used within AuthProvider");
-  }
-  return context;
 };

@@ -12,7 +12,7 @@ import {
   Home,
   User,
 } from "lucide-react";
-import { useAuth } from "../context/AuthContext";
+import { useAuth } from "../context/useAuth";
 
 const Navbar = () => {
   const [isOpen, setIsOpen] = useState(false);
