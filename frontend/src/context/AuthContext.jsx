@@ -7,7 +7,7 @@ import {
   autoSignIn,
   confirmSignIn,
   confirmSignUp,
-  fetchUserAttributes,
+  fetchAuthSession,
   getCurrentUser,
   resendSignUpCode,
   signIn,
@@ -28,7 +28,8 @@ function normalizeEmail(email) {
 
 async function readCurrentUser() {
   const currentUser = await getCurrentUser();
-  const attributes = await fetchUserAttributes();
+  const session = await fetchAuthSession();
+  const attributes = session.tokens?.idToken?.payload || {};
 
   return {
     id: currentUser.userId,
